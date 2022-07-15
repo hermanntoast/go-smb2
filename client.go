@@ -1625,10 +1625,34 @@ func (f *File) Security() (*FileSecurityInfo, error) {
 	var sacl []ACE
 	var dacl []ACE
 	if dec := info.Sacl(); dec != nil {
-		sacl = dec.ACEs()
+		for _, d := range dec.ACEs() {
+			sacl = append(sacl, ACE{
+				AceType:             d.AceType(),
+				AceFlags:            d.AceFlags(),
+				Mask:                d.Mask(),
+				Sid:                 d.Sid().Decode().String(),
+				ApplicationData:     d.ApplicationData(),
+				AttributeData:       d.AttributeData(),
+				Flags:               d.Flags(),
+				InheritedObjectType: d.InheritedObjType(),
+				ObjectType:          d.ObjectType(),
+			})
+		}
 	}
 	if dec := info.Dacl(); dec != nil {
-		dacl = dec.ACEs()
+		for _, d := range dec.ACEs() {
+			dacl = append(dacl, ACE{
+				AceType:             d.AceType(),
+				AceFlags:            d.AceFlags(),
+				Mask:                d.Mask(),
+				Sid:                 d.Sid().Decode().String(),
+				ApplicationData:     d.ApplicationData(),
+				AttributeData:       d.AttributeData(),
+				Flags:               d.Flags(),
+				InheritedObjectType: d.InheritedObjType(),
+				ObjectType:          d.ObjectType(),
+			})
+		}
 	}
 
 	return &FileSecurityInfo{
@@ -2348,4 +2372,17 @@ type FileSecurityInfo struct {
 	Flags uint16
 	Sacl  []ACE
 	Dacl  []ACE
+}
+
+type ACE struct {
+	AceType  uint8
+	AceFlags uint8
+	Mask     uint32
+	Sid      string
+
+	ApplicationData     []byte
+	AttributeData       []byte
+	Flags               uint32
+	InheritedObjectType []byte
+	ObjectType          []byte
 }
