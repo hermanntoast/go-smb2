@@ -1,0 +1,1090 @@
+From 691187b5e0cd68de7a6fd6c2d131b82e959963c8 Mon Sep 17 00:00:00 2001
+From: Arthur Bols <arthur@bols.dev>
+Date: Thu, 14 Jul 2022 16:33:01 +0200
+Subject: [PATCH 1/8] Add SMB2_0_INFO_SECURITY request support
+
+---
+ client.go              |  55 +++++++
+ internal/smb2/const.go |  29 +---
+ internal/smb2/dtyp.go  | 327 +++++++++++++++++++++++++++++++++++++++++
+ 3 files changed, 389 insertions(+), 22 deletions(-)
+
+diff --git a/client.go b/client.go
+index e0f7b36..b9dd089 100644
+--- a/client.go
++++ b/client.go
+@@ -1419,6 +1419,53 @@ func (f *File) Statfs() (FileFsInfo, error) {
+ 	return fi, nil
+ }
+ 
++func (f *File) Security() (*FileSecurityInfo, error) {
++	req := &QueryInfoRequest{
++		InfoType:              SMB2_0_INFO_SECURITY,
++		FileInfoClass:         0,
++		AdditionalInformation: OWNER_SECURITY_INFORMATION | GROUP_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION,
++		Flags:                 0,
++		OutputBufferLength:    uint32(f.maxTransactSize()),
++	}
++
++	infoBytes, err := f.queryInfo(req)
++	if err != nil {
++		return nil, err
++	}
++
++	info := SecurityDescriptorDecoder(infoBytes)
++	if info.IsInvalid() {
++		return nil, &InvalidResponseError{"broken query info response format"}
++	}
++
++	var owner *Sid
++	if info.OffsetOwner() != 0 {
++		owner = info.OwnerSid().Decode()
++	}
++	var group *Sid
++	if info.OffsetGroup() != 0 {
++		group = info.GroupSid().Decode()
++	}
++
++	var sacl []ACE
++	var dacl []ACE
++	if dec := info.Sacl(); dec != nil {
++		sacl = dec.ACEs()
++	}
++	if dec := info.Dacl(); dec != nil {
++		dacl = dec.ACEs()
++	}
++
++	return &FileSecurityInfo{
++		Owner: owner,
++		Group: group,
++		Flags: info.Control(),
++		Sacl:  sacl,
++		Dacl:  dacl,
++	}, nil
++
++}
++
+ type FileFsInfo interface {
+ 	BlockSize() uint64
+ 	FragmentSize() uint64
+@@ -2119,3 +2166,11 @@ func (fs *FileStat) IsDir() bool {
+ func (fs *FileStat) Sys() interface{} {
+ 	return fs
+ }
++
++type FileSecurityInfo struct {
++	Owner *Sid
++	Group *Sid
++	Flags uint16
++	Sacl  []ACE
++	Dacl  []ACE
++}
+diff --git a/internal/smb2/const.go b/internal/smb2/const.go
+index 146c533..92b3db6 100644
+--- a/internal/smb2/const.go
++++ b/internal/smb2/const.go
+@@ -649,14 +649,14 @@ const (
+ // AdditionalInformation
+ const (
+ 	OWNER_SECURITY_INFORMATION = 1 << iota
+-	GROUP_SECUIRTY_INFORMATION
+-	DACL_SECUIRTY_INFORMATION
+-	SACL_SECUIRTY_INFORMATION
+-	LABEL_SECUIRTY_INFORMATION
+-	ATTRIBUTE_SECUIRTY_INFORMATION
+-	SCOPE_SECUIRTY_INFORMATION
++	GROUP_SECURITY_INFORMATION
++	DACL_SECURITY_INFORMATION
++	SACL_SECURITY_INFORMATION
++	LABEL_SECURITY_INFORMATION
++	ATTRIBUTE_SECURITY_INFORMATION
++	SCOPE_SECURITY_INFORMATION
+ 
+-	BACKUP_SECUIRTY_INFORMATION = 0x10000
++	BACKUP_SECURITY_INFORMATION = 0x10000
+ )
+ 
+ // Flags
+@@ -698,18 +698,3 @@ const (
+ // FileFsControlInformation
+ // FileFsObjectIdInformation
+ )
+-
+-// AdditionalInformation
+-const (
+-// OWNER_SECURITY_INFORMATION = 1 << iota
+-// GROUP_SECUIRTY_INFORMATION
+-// DACL_SECUIRTY_INFORMATION
+-// SACL_SECUIRTY_INFORMATION
+-// LABEL_SECUIRTY_INFORMATION
+-// ATTRIBUTE_SECUIRTY_INFORMATION
+-// SCOPE_SECUIRTY_INFORMATION
+-
+-// BACKUP_SECUIRTY_INFORMATION = 0x10000
+-)
+-
+-//
+diff --git a/internal/smb2/dtyp.go b/internal/smb2/dtyp.go
+index 5fc8400..19f6afc 100644
+--- a/internal/smb2/dtyp.go
++++ b/internal/smb2/dtyp.go
+@@ -7,6 +7,72 @@ import (
+ 	"strings"
+ )
+ 
++// AclRevision
++// [MS-DTYP]: 2.4.4
++const (
++	ACL_REVISION = 2 << iota
++	ACL_REVISION_DS
++)
++
++// AceType
++// [MS-DTYP]: 2.4.4.1
++const (
++	ACE_TYPE_ACCESS_ALLOWED = 0 + iota
++	ACE_TYPE_ACCESS_DENIED
++	ACE_TYPE_SYSTEM_AUDIT
++	ACE_TYPE_SYSTEM_ALARM
++	ACE_TYPE_ACCESS_ALLOWED_COMPOUND
++	ACE_TYPE_ACCESS_ALLOWED_OBJECT
++	ACE_TYPE_ACCESS_DENIED_OBJECT
++	ACE_TYPE_SYSTEM_AUDIT_OBJECT
++	ACE_TYPE_SYSTEM_ALARM_OBJECT
++	ACE_TYPE_ACCESS_ALLOWED_CALLBACK
++	ACE_TYPE_ACCESS_DENIED_CALLBACK
++	ACE_TYPE_ACCESS_ALLOWED_CALLBACK_OBJECT
++	ACE_TYPE_ACCESS_DENIED_CALLBACK_OBJECT
++	ACE_TYPE_SYSTEM_AUDIT_CALLBACK
++	ACE_TYPE_SYSTEM_ALARM_CALLBACK
++	ACE_TYPE_SYSTEM_AUDIT_CALLBACK_OBJECT
++	ACE_TYPE_SYSTEM_ALARM_CALLBACK_OBJECT
++	ACE_TYPE_SYSTEM_MANDATORY_LABEL
++	ACE_TYPE_SYSTEM_RESOURCE_ATTRIBUTE
++	ACE_TYPE_SYSTEM_SCOPED_POLICY_ID
++)
++
++// AceFlags
++// [MS-DTYP]: 2.4.4.1
++const (
++	ACE_FLAG_OBJECT_INHERIT = 1 << iota
++	ACE_FLAG_CONTAINER_INHERIT
++	ACE_FLAG_NO_PROPAGATE_INHERIT
++	ACE_FLAG_INHERIT_ONLY
++	ACE_FLAG_INHERITED
++
++	ACE_FLAG_SUCCESSFUL_ACCESS = 0x40 << iota
++	ACE_FLAG_FAILED_ACCESS
++)
++
++// Security descriptor control flags
++// [MS-DTYP]: 2.4.6
++const (
++	SECURITY_DESCRIPTOR_OWNER_DEFAULTED = 1 << iota
++	SECURITY_DESCRIPTOR_GROUP_DEFAULTED
++	SECURITY_DESCRIPTOR_DACL_PRESENT
++	SECURITY_DESCRIPTOR_DACL_DEFAULTED
++	SECURITY_DESCRIPTOR_SACL_PRESENT
++	SECURITY_DESCRIPTOR_SACL_DEFAULTED
++	SECURITY_DESCRIPTOR_SERVER_SECURITY
++	SECURITY_DESCRIPTOR_DACL_TRUSTED
++	SECURITY_DESCRIPTOR_DACL_COMPUTED_INHERITANCE_REQUIRED
++	SECURITY_DESCRIPTOR_SACL_COMPUTED_INHERITANCE_REQUIRED
++	SECURITY_DESCRIPTOR_DACL_AUTO_INHERITED
++	SECURITY_DESCRIPTOR_SACL_AUTO_INHERITED
++	SECURITY_DESCRIPTOR_DACL_PROTECTED
++	SECURITY_DESCRIPTOR_SACL_PROTECTED
++	SECURITY_DESCRIPTOR_RM_CONTROL_VALID
++	SECURITY_DESCRIPTOR_SELF_RELATIVE
++)
++
+ type Filetime struct {
+ 	LowDateTime  uint32
+ 	HighDateTime uint32
+@@ -148,3 +214,264 @@ func (c SidDecoder) Decode() *Sid {
+ 		SubAuthority:        c.SubAuthority(),
+ 	}
+ }
++
++type SecurityDescriptorDecoder []byte
++
++func (c SecurityDescriptorDecoder) IsInvalid() bool {
++	if len(c) < 20 {
++		return true
++	}
++
++	expLength := 20
++	if c.Revision() != 1 {
++		return true
++	}
++	if c.OffsetOwner() != 0 {
++		if c.OwnerSid().IsInvalid() {
++			return true
++		}
++		expLength += c.OwnerSid().Decode().Size()
++	}
++
++	if c.OffsetGroup() != 0 {
++		if c.GroupSid().IsInvalid() {
++			return true
++		}
++		expLength += c.GroupSid().Decode().Size()
++	}
++
++	if c.OffsetSacl() != 0 {
++		if c.Control()&SECURITY_DESCRIPTOR_SACL_PRESENT == 0 || c.Sacl().IsInvalid() {
++			return true
++		}
++		expLength += int(c.Sacl().AclSize())
++	} else if c.Control()&SECURITY_DESCRIPTOR_SACL_PRESENT != 0 {
++		return true
++	}
++
++	if c.OffsetDacl() != 0 {
++		if c.Control()&SECURITY_DESCRIPTOR_DACL_PRESENT == 0 || c.Dacl().IsInvalid() {
++			return true
++		}
++		expLength += int(c.Dacl().AclSize())
++	} else if c.Control()&SECURITY_DESCRIPTOR_DACL_PRESENT != 0 {
++		return true
++	}
++
++	if len(c) != expLength {
++		return true
++	}
++
++	return false
++}
++
++func (c SecurityDescriptorDecoder) Revision() uint8 {
++	return c[0]
++}
++
++func (c SecurityDescriptorDecoder) Sbz1() uint8 {
++	return c[1]
++}
++
++func (c SecurityDescriptorDecoder) Control() uint16 {
++	return le.Uint16(c[2:4])
++}
++
++func (c SecurityDescriptorDecoder) OffsetOwner() uint32 {
++	return le.Uint32(c[4:8])
++}
++
++func (c SecurityDescriptorDecoder) OffsetGroup() uint32 {
++	return le.Uint32(c[8:12])
++}
++
++func (c SecurityDescriptorDecoder) OffsetSacl() uint32 {
++	return le.Uint32(c[12:16])
++}
++
++func (c SecurityDescriptorDecoder) OffsetDacl() uint32 {
++	return le.Uint32(c[16:20])
++}
++
++func (c SecurityDescriptorDecoder) OwnerSid() SidDecoder {
++	return sidDecoderFromBytes(c[c.OffsetOwner():])
++}
++
++func (c SecurityDescriptorDecoder) GroupSid() SidDecoder {
++	return sidDecoderFromBytes(c[c.OffsetGroup():])
++}
++
++func (c SecurityDescriptorDecoder) Sacl() ACLDecoder {
++	if c.Control()&SECURITY_DESCRIPTOR_SACL_PRESENT == 0 {
++		return nil
++	}
++	return aclDecoderFromBytes(c[c.OffsetSacl():])
++}
++
++func (c SecurityDescriptorDecoder) Dacl() ACLDecoder {
++	if c.Control()&SECURITY_DESCRIPTOR_DACL_PRESENT == 0 {
++		return nil
++	}
++	return aclDecoderFromBytes(c[c.OffsetDacl():])
++}
++
++func sidDecoderFromBytes(b []byte) SidDecoder {
++	s := SidDecoder(b)
++	length := uint32(8 + s.SubAuthorityCount()*4)
++
++	return s[0:length]
++}
++
++func aclDecoderFromBytes(b []byte) ACLDecoder {
++	s := ACLDecoder(b)
++	return s[0:s.AclSize()]
++}
++
++type ACEHeader struct {
++	AceType  uint8
++	AceFlags uint8
++}
++
++type ACEAdditionalDataDecode []byte
++
++type ACE struct {
++	ACEHeader
++	Mask uint32
++	Sid  *Sid
++
++	ApplicationData     []byte
++	AttributeData       []byte
++	Flags               uint32
++	InheritedObjectType []byte
++	ObjectType          []byte
++}
++
++type ACEDecoder []byte
++
++func (c ACEDecoder) AceType() uint8 {
++	return c[0]
++}
++
++func (c ACEDecoder) AceFlags() uint8 {
++	return c[1]
++}
++
++func (c ACEDecoder) AceSize() uint16 {
++	return le.Uint16(c[2:4])
++}
++
++func (c ACEDecoder) Mask() uint32 {
++	return le.Uint32(c[4:8])
++}
++
++func (c ACEDecoder) Decode() ACE {
++	h := ACEHeader{
++		AceType:  c.AceType(),
++		AceFlags: c.AceFlags(),
++	}
++
++	body := c[8:]
++
++	var flags uint32
++	var objType []byte
++	var inheritedObjType []byte
++	var applicationData []byte
++	var attributeData []byte
++
++	switch h.AceType {
++	case ACE_TYPE_ACCESS_ALLOWED_OBJECT,
++		ACE_TYPE_ACCESS_DENIED_OBJECT,
++		ACE_TYPE_ACCESS_ALLOWED_CALLBACK_OBJECT,
++		ACE_TYPE_ACCESS_DENIED_CALLBACK_OBJECT,
++		ACE_TYPE_SYSTEM_AUDIT_OBJECT,
++		ACE_TYPE_SYSTEM_AUDIT_CALLBACK_OBJECT:
++		flags = le.Uint32(body[0:4])
++		objType = body[4:20]
++		inheritedObjType = body[20:36]
++		body = body[36:]
++	}
++
++	sid := sidDecoderFromBytes(body).Decode()
++	body = body[sid.Size():]
++
++	switch h.AceType {
++	case ACE_TYPE_ACCESS_ALLOWED_CALLBACK,
++		ACE_TYPE_ACCESS_DENIED_CALLBACK,
++		ACE_TYPE_ACCESS_ALLOWED_CALLBACK_OBJECT,
++		ACE_TYPE_ACCESS_DENIED_CALLBACK_OBJECT,
++		ACE_TYPE_SYSTEM_AUDIT_OBJECT,
++		ACE_TYPE_SYSTEM_AUDIT_CALLBACK,
++		ACE_TYPE_SYSTEM_AUDIT_CALLBACK_OBJECT:
++		applicationData = body
++	}
++
++	switch h.AceType {
++	case ACE_TYPE_SYSTEM_RESOURCE_ATTRIBUTE:
++		attributeData = body
++	}
++
++	return ACE{
++		ACEHeader:           h,
++		Mask:                c.Mask(),
++		Sid:                 sid,
++		ApplicationData:     applicationData,
++		AttributeData:       attributeData,
++		Flags:               flags,
++		InheritedObjectType: inheritedObjType,
++		ObjectType:          objType,
++	}
++}
++
++type ACL struct {
++	AclRevision uint8
++	Aces        []ACE
++}
++
++type ACLDecoder []byte
++
++func (c ACLDecoder) Decode() ACL {
++	return ACL{
++		AclRevision: c.AclRevision(),
++		Aces:        c.ACEs(),
++	}
++}
++
++func (c ACLDecoder) IsInvalid() bool {
++	return len(c) < 8 || len(c) != int(c.AclSize())
++}
++
++func (c ACLDecoder) AclRevision() uint8 {
++	return c[0]
++}
++
++func (c ACLDecoder) Sbz1() uint8 {
++	return c[1]
++}
++
++func (c ACLDecoder) AclSize() uint16 {
++	return le.Uint16(c[2:4])
++}
++
++func (c ACLDecoder) AceCount() uint16 {
++	return le.Uint16(c[4:6])
++}
++
++func (c ACLDecoder) Sbz2() uint16 {
++	return le.Uint16(c[6:8])
++}
++
++func (c ACLDecoder) ACEs() []ACE {
++	var aces []ACE
++	var aceData ACEDecoder
++	remaining := ACEDecoder(c[8:])
++
++	count := int(c.AceCount())
++	for i := 0; i < count; i++ {
++		size := remaining.AceSize()
++		aceData, remaining = remaining[:size], remaining[size:]
++
++		aces = append(aces, aceData.Decode())
++	}
++
++	return aces
++}
+
+From 83b110249da42b0257ed52c0a3a4f6cbdda86fbf Mon Sep 17 00:00:00 2001
+From: Arthur Bols <arthur@bols.dev>
+Date: Fri, 15 Jul 2022 10:30:10 +0200
+Subject: [PATCH 2/8] FileSecurityInfo: Use string for owner/group
+
+---
+ client.go | 12 ++++++------
+ 1 file changed, 6 insertions(+), 6 deletions(-)
+
+diff --git a/client.go b/client.go
+index b9dd089..0626ec2 100644
+--- a/client.go
++++ b/client.go
+@@ -1438,13 +1438,13 @@ func (f *File) Security() (*FileSecurityInfo, error) {
+ 		return nil, &InvalidResponseError{"broken query info response format"}
+ 	}
+ 
+-	var owner *Sid
++	var owner string
+ 	if info.OffsetOwner() != 0 {
+-		owner = info.OwnerSid().Decode()
++		owner = info.OwnerSid().Decode().String()
+ 	}
+-	var group *Sid
++	var group string
+ 	if info.OffsetGroup() != 0 {
+-		group = info.GroupSid().Decode()
++		group = info.GroupSid().Decode().String()
+ 	}
+ 
+ 	var sacl []ACE
+@@ -2168,8 +2168,8 @@ func (fs *FileStat) Sys() interface{} {
+ }
+ 
+ type FileSecurityInfo struct {
+-	Owner *Sid
+-	Group *Sid
++	Owner string
++	Group string
+ 	Flags uint16
+ 	Sacl  []ACE
+ 	Dacl  []ACE
+
+From 3edd2fd5105501db9aae0c62a6192191984fc5e9 Mon Sep 17 00:00:00 2001
+From: Arthur Bols <arthur@bols.dev>
+Date: Fri, 15 Jul 2022 11:04:58 +0200
+Subject: [PATCH 3/8] Refactor decoding ACEs
+
+---
+ client.go             |  41 +++++++++++++-
+ internal/smb2/dtyp.go | 127 +++++++++++++++++++++++++-----------------
+ 2 files changed, 114 insertions(+), 54 deletions(-)
+
+diff --git a/client.go b/client.go
+index 0626ec2..d069b95 100644
+--- a/client.go
++++ b/client.go
+@@ -1450,10 +1450,34 @@ func (f *File) Security() (*FileSecurityInfo, error) {
+ 	var sacl []ACE
+ 	var dacl []ACE
+ 	if dec := info.Sacl(); dec != nil {
+-		sacl = dec.ACEs()
++		for _, d := range dec.ACEs() {
++			sacl = append(sacl, ACE{
++				AceType:             d.AceType(),
++				AceFlags:            d.AceFlags(),
++				Mask:                d.Mask(),
++				Sid:                 d.Sid().Decode().String(),
++				ApplicationData:     d.ApplicationData(),
++				AttributeData:       d.AttributeData(),
++				Flags:               d.Flags(),
++				InheritedObjectType: d.InheritedObjType(),
++				ObjectType:          d.ObjectType(),
++			})
++		}
+ 	}
+ 	if dec := info.Dacl(); dec != nil {
+-		dacl = dec.ACEs()
++		for _, d := range dec.ACEs() {
++			dacl = append(dacl, ACE{
++				AceType:             d.AceType(),
++				AceFlags:            d.AceFlags(),
++				Mask:                d.Mask(),
++				Sid:                 d.Sid().Decode().String(),
++				ApplicationData:     d.ApplicationData(),
++				AttributeData:       d.AttributeData(),
++				Flags:               d.Flags(),
++				InheritedObjectType: d.InheritedObjType(),
++				ObjectType:          d.ObjectType(),
++			})
++		}
+ 	}
+ 
+ 	return &FileSecurityInfo{
+@@ -2174,3 +2198,16 @@ type FileSecurityInfo struct {
+ 	Sacl  []ACE
+ 	Dacl  []ACE
+ }
++
++type ACE struct {
++	AceType  uint8
++	AceFlags uint8
++	Mask     uint32
++	Sid      string
++
++	ApplicationData     []byte
++	AttributeData       []byte
++	Flags               uint32
++	InheritedObjectType []byte
++	ObjectType          []byte
++}
+diff --git a/internal/smb2/dtyp.go b/internal/smb2/dtyp.go
+index 19f6afc..1476736 100644
+--- a/internal/smb2/dtyp.go
++++ b/internal/smb2/dtyp.go
+@@ -327,25 +327,8 @@ func aclDecoderFromBytes(b []byte) ACLDecoder {
+ 	return s[0:s.AclSize()]
+ }
+ 
+-type ACEHeader struct {
+-	AceType  uint8
+-	AceFlags uint8
+-}
+-
+ type ACEAdditionalDataDecode []byte
+ 
+-type ACE struct {
+-	ACEHeader
+-	Mask uint32
+-	Sid  *Sid
+-
+-	ApplicationData     []byte
+-	AttributeData       []byte
+-	Flags               uint32
+-	InheritedObjectType []byte
+-	ObjectType          []byte
+-}
+-
+ type ACEDecoder []byte
+ 
+ func (c ACEDecoder) AceType() uint8 {
+@@ -364,37 +347,70 @@ func (c ACEDecoder) Mask() uint32 {
+ 	return le.Uint32(c[4:8])
+ }
+ 
+-func (c ACEDecoder) Decode() ACE {
+-	h := ACEHeader{
+-		AceType:  c.AceType(),
+-		AceFlags: c.AceFlags(),
++func (c ACEDecoder) Sid() SidDecoder {
++	body := c[8:]
++	switch c.AceType() {
++	case ACE_TYPE_ACCESS_ALLOWED_OBJECT,
++		ACE_TYPE_ACCESS_DENIED_OBJECT,
++		ACE_TYPE_ACCESS_ALLOWED_CALLBACK_OBJECT,
++		ACE_TYPE_ACCESS_DENIED_CALLBACK_OBJECT,
++		ACE_TYPE_SYSTEM_AUDIT_OBJECT,
++		ACE_TYPE_SYSTEM_AUDIT_CALLBACK_OBJECT:
++
++		body = body[36:]
+ 	}
+ 
+-	body := c[8:]
++	return sidDecoderFromBytes(body)
++}
++
++func (c ACEDecoder) Flags() uint32 {
++	switch c.AceType() {
++	case ACE_TYPE_ACCESS_ALLOWED_OBJECT,
++		ACE_TYPE_ACCESS_DENIED_OBJECT,
++		ACE_TYPE_ACCESS_ALLOWED_CALLBACK_OBJECT,
++		ACE_TYPE_ACCESS_DENIED_CALLBACK_OBJECT,
++		ACE_TYPE_SYSTEM_AUDIT_OBJECT,
++		ACE_TYPE_SYSTEM_AUDIT_CALLBACK_OBJECT:
++
++		return le.Uint32(c[8:12])
++	}
+ 
+-	var flags uint32
+-	var objType []byte
+-	var inheritedObjType []byte
+-	var applicationData []byte
+-	var attributeData []byte
++	return 0
++}
+ 
+-	switch h.AceType {
++func (c ACEDecoder) ObjectType() []byte {
++	switch c.AceType() {
+ 	case ACE_TYPE_ACCESS_ALLOWED_OBJECT,
+ 		ACE_TYPE_ACCESS_DENIED_OBJECT,
+ 		ACE_TYPE_ACCESS_ALLOWED_CALLBACK_OBJECT,
+ 		ACE_TYPE_ACCESS_DENIED_CALLBACK_OBJECT,
+ 		ACE_TYPE_SYSTEM_AUDIT_OBJECT,
+ 		ACE_TYPE_SYSTEM_AUDIT_CALLBACK_OBJECT:
+-		flags = le.Uint32(body[0:4])
+-		objType = body[4:20]
+-		inheritedObjType = body[20:36]
+-		body = body[36:]
++
++		return c[12:28]
++	}
++
++	return nil
++}
++
++func (c ACEDecoder) InheritedObjType() []byte {
++	switch c.AceType() {
++	case ACE_TYPE_ACCESS_ALLOWED_OBJECT,
++		ACE_TYPE_ACCESS_DENIED_OBJECT,
++		ACE_TYPE_ACCESS_ALLOWED_CALLBACK_OBJECT,
++		ACE_TYPE_ACCESS_DENIED_CALLBACK_OBJECT,
++		ACE_TYPE_SYSTEM_AUDIT_OBJECT,
++		ACE_TYPE_SYSTEM_AUDIT_CALLBACK_OBJECT:
++
++		return c[28:44]
+ 	}
+ 
+-	sid := sidDecoderFromBytes(body).Decode()
+-	body = body[sid.Size():]
++	return nil
++}
++
++func (c ACEDecoder) ApplicationData() []byte {
+ 
+-	switch h.AceType {
++	switch c.AceType() {
+ 	case ACE_TYPE_ACCESS_ALLOWED_CALLBACK,
+ 		ACE_TYPE_ACCESS_DENIED_CALLBACK,
+ 		ACE_TYPE_ACCESS_ALLOWED_CALLBACK_OBJECT,
+@@ -402,29 +418,36 @@ func (c ACEDecoder) Decode() ACE {
+ 		ACE_TYPE_SYSTEM_AUDIT_OBJECT,
+ 		ACE_TYPE_SYSTEM_AUDIT_CALLBACK,
+ 		ACE_TYPE_SYSTEM_AUDIT_CALLBACK_OBJECT:
+-		applicationData = body
++
++		body := c[8:]
++		sid := sidDecoderFromBytes(body).Decode()
++		body = body[sid.Size():]
++
++		if len(c.ObjectType()) > 0 {
++			return c[36:]
++		}
++		return body
+ 	}
+ 
+-	switch h.AceType {
++	return nil
++}
++
++func (c ACEDecoder) AttributeData() []byte {
++	switch c.AceType() {
+ 	case ACE_TYPE_SYSTEM_RESOURCE_ATTRIBUTE:
+-		attributeData = body
+-	}
++		body := c[8:]
++		sid := sidDecoderFromBytes(body).Decode()
++		body = body[sid.Size():]
+ 
+-	return ACE{
+-		ACEHeader:           h,
+-		Mask:                c.Mask(),
+-		Sid:                 sid,
+-		ApplicationData:     applicationData,
+-		AttributeData:       attributeData,
+-		Flags:               flags,
+-		InheritedObjectType: inheritedObjType,
+-		ObjectType:          objType,
++		return body
+ 	}
++
++	return nil
+ }
+ 
+ type ACL struct {
+ 	AclRevision uint8
+-	Aces        []ACE
++	Aces        []ACEDecoder
+ }
+ 
+ type ACLDecoder []byte
+@@ -460,8 +483,8 @@ func (c ACLDecoder) Sbz2() uint16 {
+ 	return le.Uint16(c[6:8])
+ }
+ 
+-func (c ACLDecoder) ACEs() []ACE {
+-	var aces []ACE
++func (c ACLDecoder) ACEs() []ACEDecoder {
++	var aces []ACEDecoder
+ 	var aceData ACEDecoder
+ 	remaining := ACEDecoder(c[8:])
+ 
+@@ -470,7 +493,7 @@ func (c ACLDecoder) ACEs() []ACE {
+ 		size := remaining.AceSize()
+ 		aceData, remaining = remaining[:size], remaining[size:]
+ 
+-		aces = append(aces, aceData.Decode())
++		aces = append(aces, aceData)
+ 	}
+ 
+ 	return aces
+
+From c1b4fedd0561b2460371facbb3348a19b83e7c68 Mon Sep 17 00:00:00 2001
+From: Arthur Bols <arthur@bols.dev>
+Date: Sun, 17 Jul 2022 17:38:55 +0200
+Subject: [PATCH 4/8] Remove unnecessary helper methods
+
+---
+ internal/smb2/dtyp.go | 26 +++++++-------------------
+ 1 file changed, 7 insertions(+), 19 deletions(-)
+
+diff --git a/internal/smb2/dtyp.go b/internal/smb2/dtyp.go
+index 1476736..89dd533 100644
+--- a/internal/smb2/dtyp.go
++++ b/internal/smb2/dtyp.go
+@@ -294,37 +294,25 @@ func (c SecurityDescriptorDecoder) OffsetDacl() uint32 {
+ }
+ 
+ func (c SecurityDescriptorDecoder) OwnerSid() SidDecoder {
+-	return sidDecoderFromBytes(c[c.OffsetOwner():])
++	return SidDecoder(c[c.OffsetOwner():])
+ }
+ 
+ func (c SecurityDescriptorDecoder) GroupSid() SidDecoder {
+-	return sidDecoderFromBytes(c[c.OffsetGroup():])
++	return SidDecoder(c[c.OffsetGroup():])
+ }
+ 
+ func (c SecurityDescriptorDecoder) Sacl() ACLDecoder {
+ 	if c.Control()&SECURITY_DESCRIPTOR_SACL_PRESENT == 0 {
+ 		return nil
+ 	}
+-	return aclDecoderFromBytes(c[c.OffsetSacl():])
++	return ACLDecoder(c[c.OffsetSacl():])
+ }
+ 
+ func (c SecurityDescriptorDecoder) Dacl() ACLDecoder {
+ 	if c.Control()&SECURITY_DESCRIPTOR_DACL_PRESENT == 0 {
+ 		return nil
+ 	}
+-	return aclDecoderFromBytes(c[c.OffsetDacl():])
+-}
+-
+-func sidDecoderFromBytes(b []byte) SidDecoder {
+-	s := SidDecoder(b)
+-	length := uint32(8 + s.SubAuthorityCount()*4)
+-
+-	return s[0:length]
+-}
+-
+-func aclDecoderFromBytes(b []byte) ACLDecoder {
+-	s := ACLDecoder(b)
+-	return s[0:s.AclSize()]
++	return ACLDecoder(c[c.OffsetDacl():])
+ }
+ 
+ type ACEAdditionalDataDecode []byte
+@@ -360,7 +348,7 @@ func (c ACEDecoder) Sid() SidDecoder {
+ 		body = body[36:]
+ 	}
+ 
+-	return sidDecoderFromBytes(body)
++	return SidDecoder(body)
+ }
+ 
+ func (c ACEDecoder) Flags() uint32 {
+@@ -420,7 +408,7 @@ func (c ACEDecoder) ApplicationData() []byte {
+ 		ACE_TYPE_SYSTEM_AUDIT_CALLBACK_OBJECT:
+ 
+ 		body := c[8:]
+-		sid := sidDecoderFromBytes(body).Decode()
++		sid := SidDecoder(body).Decode()
+ 		body = body[sid.Size():]
+ 
+ 		if len(c.ObjectType()) > 0 {
+@@ -436,7 +424,7 @@ func (c ACEDecoder) AttributeData() []byte {
+ 	switch c.AceType() {
+ 	case ACE_TYPE_SYSTEM_RESOURCE_ATTRIBUTE:
+ 		body := c[8:]
+-		sid := sidDecoderFromBytes(body).Decode()
++		sid := SidDecoder(body).Decode()
+ 		body = body[sid.Size():]
+ 
+ 		return body
+
+From 6a47ac1a6117ef9e8fc19c16cf5d47edc872149f Mon Sep 17 00:00:00 2001
+From: Arthur Bols <arthur@bols.dev>
+Date: Tue, 19 Jul 2022 13:30:00 +0200
+Subject: [PATCH 5/8] Refactor: better arrange Security()
+
+---
+ client.go | 51 +++++++++++++++++++++++++++++----------------------
+ 1 file changed, 29 insertions(+), 22 deletions(-)
+
+diff --git a/client.go b/client.go
+index d069b95..9f8afb3 100644
+--- a/client.go
++++ b/client.go
+@@ -1419,7 +1419,36 @@ func (f *File) Statfs() (FileFsInfo, error) {
+ 	return fi, nil
+ }
+ 
++type FileSecurityInfo struct {
++	Owner string
++	Group string
++	Flags uint16
++	Sacl  []ACE
++	Dacl  []ACE
++}
++
++type ACE struct {
++	AceType  uint8
++	AceFlags uint8
++	Mask     uint32
++	Sid      string
++
++	ApplicationData     []byte
++	AttributeData       []byte
++	Flags               uint32
++	InheritedObjectType []byte
++	ObjectType          []byte
++}
++
+ func (f *File) Security() (*FileSecurityInfo, error) {
++	fi, err := f.security()
++	if err != nil {
++		return nil, &os.PathError{Op: "security", Path: f.name, Err: err}
++	}
++	return fi, nil
++}
++
++func (f *File) security() (*FileSecurityInfo, error) {
+ 	req := &QueryInfoRequest{
+ 		InfoType:              SMB2_0_INFO_SECURITY,
+ 		FileInfoClass:         0,
+@@ -1487,7 +1516,6 @@ func (f *File) Security() (*FileSecurityInfo, error) {
+ 		Sacl:  sacl,
+ 		Dacl:  dacl,
+ 	}, nil
+-
+ }
+ 
+ type FileFsInfo interface {
+@@ -2190,24 +2218,3 @@ func (fs *FileStat) IsDir() bool {
+ func (fs *FileStat) Sys() interface{} {
+ 	return fs
+ }
+-
+-type FileSecurityInfo struct {
+-	Owner string
+-	Group string
+-	Flags uint16
+-	Sacl  []ACE
+-	Dacl  []ACE
+-}
+-
+-type ACE struct {
+-	AceType  uint8
+-	AceFlags uint8
+-	Mask     uint32
+-	Sid      string
+-
+-	ApplicationData     []byte
+-	AttributeData       []byte
+-	Flags               uint32
+-	InheritedObjectType []byte
+-	ObjectType          []byte
+-}
+
+From bb7efe3b360a70bc844f1dea0ed2c432cd0850db Mon Sep 17 00:00:00 2001
+From: Arthur Bols <arthur@bols.dev>
+Date: Tue, 19 Jul 2022 13:33:13 +0200
+Subject: [PATCH 6/8] Remove unused ACL/ACE methods and structs
+
+---
+ internal/smb2/dtyp.go | 14 --------------
+ 1 file changed, 14 deletions(-)
+
+diff --git a/internal/smb2/dtyp.go b/internal/smb2/dtyp.go
+index 89dd533..f10f868 100644
+--- a/internal/smb2/dtyp.go
++++ b/internal/smb2/dtyp.go
+@@ -315,8 +315,6 @@ func (c SecurityDescriptorDecoder) Dacl() ACLDecoder {
+ 	return ACLDecoder(c[c.OffsetDacl():])
+ }
+ 
+-type ACEAdditionalDataDecode []byte
+-
+ type ACEDecoder []byte
+ 
+ func (c ACEDecoder) AceType() uint8 {
+@@ -433,20 +431,8 @@ func (c ACEDecoder) AttributeData() []byte {
+ 	return nil
+ }
+ 
+-type ACL struct {
+-	AclRevision uint8
+-	Aces        []ACEDecoder
+-}
+-
+ type ACLDecoder []byte
+ 
+-func (c ACLDecoder) Decode() ACL {
+-	return ACL{
+-		AclRevision: c.AclRevision(),
+-		Aces:        c.ACEs(),
+-	}
+-}
+-
+ func (c ACLDecoder) IsInvalid() bool {
+ 	return len(c) < 8 || len(c) != int(c.AclSize())
+ }
+
+From 75c30157fe75b808f636e3ec7d3b70622d1560dc Mon Sep 17 00:00:00 2001
+From: Arthur Bols <arthur@bols.dev>
+Date: Tue, 19 Jul 2022 14:04:51 +0200
+Subject: [PATCH 7/8] Add security() test
+
+---
+ smb2_test.go | 36 ++++++++++++++++++++++++++++++++++++
+ 1 file changed, 36 insertions(+)
+
+diff --git a/smb2_test.go b/smb2_test.go
+index fbb37cb..4bea369 100644
+--- a/smb2_test.go
++++ b/smb2_test.go
+@@ -880,3 +880,39 @@ func TestGlob(t *testing.T) {
+ 		t.Errorf("unexpected matches: %v != %v", matches5, expected5)
+ 	}
+ }
++
++func TestSecurity(t *testing.T) {
++	if fs == nil {
++		t.Skip()
++	}
++	testDir := fmt.Sprintf("testDir-%d-TestSecurity", os.Getpid())
++	err := fs.Mkdir(testDir, 0755)
++	if err != nil {
++		t.Fatal(err)
++	}
++	defer fs.RemoveAll(testDir)
++
++	f, err := fs.Create(testDir + `\testFile`)
++	if err != nil {
++		t.Fatal(err)
++	}
++	defer fs.Remove(testDir + `\testFile`)
++	defer f.Close()
++
++	secInfo, err := f.Security()
++	if !strings.HasPrefix(secInfo.Owner, "S-1-") {
++		t.Error("unexpected owner:", secInfo.Owner)
++	}
++
++	if !strings.HasPrefix(secInfo.Group, "S-1-") {
++		t.Error("unexpected group:", secInfo.Group)
++	}
++
++	if secInfo.Flags&4&32768 != 0 { //SECURITY_DESCRIPTOR_DACL_PRESENT & SECURITY_DESCRIPTOR_SELF_RELATIVE
++		t.Error("unexpected flags:", secInfo.Flags)
++	}
++
++	if len(secInfo.Dacl) == 0 {
++		t.Error("unexpected missing DACL")
++	}
++}
+
+From d5fbd643d6236086239ec5cc55d0b2c166f75bb6 Mon Sep 17 00:00:00 2001
+From: Arthur Bols <arthur@bols.dev>
+Date: Wed, 20 Jul 2022 12:23:56 +0200
+Subject: [PATCH 8/8] Add Security method on Share
+
+---
+ client.go | 34 ++++++++++++++++++++++++++++++++++
+ 1 file changed, 34 insertions(+)
+
+diff --git a/client.go b/client.go
+index 9f8afb3..89dd85d 100644
+--- a/client.go
++++ b/client.go
+@@ -904,6 +904,40 @@ func (fs *Share) Statfs(name string) (FileFsInfo, error) {
+ 	return fi, nil
+ }
+ 
++func (fs *Share) Security(name string) (*FileSecurityInfo, error) {
++	name = normPath(name)
++
++	if err := validatePath("security", name, false); err != nil {
++		return nil, err
++	}
++
++	create := &CreateRequest{
++		SecurityFlags:        0,
++		RequestedOplockLevel: SMB2_OPLOCK_LEVEL_NONE,
++		ImpersonationLevel:   Impersonation,
++		SmbCreateFlags:       0,
++		DesiredAccess:        READ_CONTROL,
++		FileAttributes:       0,
++		ShareAccess:          FILE_SHARE_READ,
++		CreateDisposition:    FILE_OPEN,
++		CreateOptions:        0,
++	}
++
++	f, err := fs.createFile(name, create, true)
++	if err != nil {
++		return nil, &os.PathError{Op: "security", Path: name, Err: err}
++	}
++
++	fi, err := f.security()
++	if e := f.close(); err == nil {
++		err = e
++	}
++	if err != nil {
++		return nil, &os.PathError{Op: "security", Path: name, Err: err}
++	}
++	return fi, nil
++}
++
+ func (fs *Share) createFile(name string, req *CreateRequest, followSymlinks bool) (f *File, err error) {
+ 	if followSymlinks {
+ 		return fs.createFileRec(name, req)
