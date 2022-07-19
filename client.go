@@ -1594,7 +1594,36 @@ func (f *File) Statfs() (FileFsInfo, error) {
 	return fi, nil
 }
 
+type FileSecurityInfo struct {
+	Owner string
+	Group string
+	Flags uint16
+	Sacl  []ACE
+	Dacl  []ACE
+}
+
+type ACE struct {
+	AceType  uint8
+	AceFlags uint8
+	Mask     uint32
+	Sid      string
+
+	ApplicationData     []byte
+	AttributeData       []byte
+	Flags               uint32
+	InheritedObjectType []byte
+	ObjectType          []byte
+}
+
 func (f *File) Security() (*FileSecurityInfo, error) {
+	fi, err := f.security()
+	if err != nil {
+		return nil, &os.PathError{Op: "security", Path: f.name, Err: err}
+	}
+	return fi, nil
+}
+
+func (f *File) security() (*FileSecurityInfo, error) {
 	req := &QueryInfoRequest{
 		InfoType:              SMB2_0_INFO_SECURITY,
 		FileInfoClass:         0,
@@ -1662,7 +1691,6 @@ func (f *File) Security() (*FileSecurityInfo, error) {
 		Sacl:  sacl,
 		Dacl:  dacl,
 	}, nil
-
 }
 
 type FileFsInfo interface {
@@ -2364,25 +2392,4 @@ func (fs *FileStat) IsDir() bool {
 
 func (fs *FileStat) Sys() interface{} {
 	return fs
-}
-
-type FileSecurityInfo struct {
-	Owner string
-	Group string
-	Flags uint16
-	Sacl  []ACE
-	Dacl  []ACE
-}
-
-type ACE struct {
-	AceType  uint8
-	AceFlags uint8
-	Mask     uint32
-	Sid      string
-
-	ApplicationData     []byte
-	AttributeData       []byte
-	Flags               uint32
-	InheritedObjectType []byte
-	ObjectType          []byte
 }
