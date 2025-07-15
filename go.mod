@@ -1,9 +1,8 @@
 module github.com/hermanntoast/go-smb2
 
-go 1.12
+go 1.24.4
 
 require (
-	github.com/geoffgarside/ber v1.1.0
-	github.com/hermanntoast/go-smb2 v1.1.0
-	golang.org/x/crypto v0.0.0-20200728195943-123391ffb6de
+	github.com/geoffgarside/ber v1.2.0
+	golang.org/x/crypto v0.40.0
 )
