@@ -1084,7 +1084,7 @@ func (c *IoctlRequest) Encode(pkt []byte) {
 }
 
 // RespDFSReferral parse the DFS response which came as a IOCTL payload
-func (r IoctlResponseDecoder) RespDFSReferral(reqFileName string) []*CommonDFSResp {
+func (r IoctlResponseDecoder) RespDFSReferral() []*CommonDFSResp {
 	output := r.Output()
 	respDfsReferral := &RespGetDFSReferral{}
 

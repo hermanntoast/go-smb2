@@ -1131,12 +1131,9 @@ OUTPUT:
  1. []DFSTarget --> This is the list of folder targets(referrals) where this directory is present.
  2. error       --> Error if we fetch DFS operation fails.
 */
-func (fs *Share) GetDFSTargetList(c *Session, sharename, dirname string, isLink bool) ([]*DFSTarget, error) {
+func (fs *Share) GetDFSTargetList(c *Session, sharename string) ([]*DFSTarget, error) {
 
 	dfsname := fmt.Sprintf("\\%s\\%s", parseFQDNFromConnection(c.addr), sharename)
-	if isLink {
-		dfsname = fmt.Sprintf("\\%s\\%s\\%s", parseFQDNFromConnection(c.addr), sharename, dirname)
-	}
 
 	// this is for handling multiple calls
 	// fs.mapWriterLock.Lock()
@@ -1144,21 +1141,21 @@ func (fs *Share) GetDFSTargetList(c *Session, sharename, dirname string, isLink 
 
 	//check if its present in the map
 	//TODO: Add the TTL for this target and check here. Otherwise invalidate this cache entry
-	cachedTargetList, ok := fs.dfsTargetList[getFirstChild(dfsname, dirname, isLink)]
-	if ok {
-		var actualTargetForEntry []*DFSTarget
-		for _, i := range cachedTargetList {
-			actualTargetForEntry = append(actualTargetForEntry, parseNetworkAddress(dfsname, i.dfsPath, i.networkAddressPath))
-		}
-		return actualTargetForEntry, nil
-	}
+	// cachedTargetList, ok := fs.dfsTargetList[getFirstChild(dfsname, dirname, isLink)]
+	// if ok {
+	// 	var actualTargetForEntry []*DFSTarget
+	// 	for _, i := range cachedTargetList {
+	// 		actualTargetForEntry = append(actualTargetForEntry, parseNetworkAddress(dfsname, i.dfsPath, i.networkAddressPath))
+	// 	}
+	// 	return actualTargetForEntry, nil
+	// }
 
 	//Note: For Windows based DFS systems - For converting dirname as Request file name, we need to append one extra space. If not done, response
 	//is not formed properly. This is not requried for DFS based of Nutanix Machines
 	dfsRefReq := DFSReferralRequest{
 		MaxReferralLevel: 4,
-		RequestFileName:  fmt.Sprintf("%s ", dfsname), // Note this is the tweak for Windows DFS vs Nutanix DFS
-		//RequestFileName:  fmt.Sprintf("%s", dfsname), // Note this will work with Non Windows DFS
+		//RequestFileName:  fmt.Sprintf("%s ", dfsname), // Note this is the tweak for Windows DFS vs Nutanix DFS
+		RequestFileName: fmt.Sprintf("%s", dfsname), // Note this will work with Non Windows DFS
 	}
 
 	//prepare the IOCTL request body
@@ -1187,7 +1184,7 @@ func (fs *Share) GetDFSTargetList(c *Session, sharename, dirname string, isLink 
 
 	//parse the response and come up with dfs target list
 	//TODO: need to think abour the error scenario's
-	dfsRespList := r.RespDFSReferral(dfsname)
+	dfsRespList := r.RespDFSReferral()
 
 	var dfsTargetList []*DFSTarget
 	for _, dfsResp := range dfsRespList {
@@ -1195,7 +1192,7 @@ func (fs *Share) GetDFSTargetList(c *Session, sharename, dirname string, isLink 
 	}
 
 	//update the dfsTargetList map, so that in future we won't make this request
-	fs.dfsTargetList[getFirstChild(dfsname, dirname, isLink)] = dfsTargetList
+	// fs.dfsTargetList[getFirstChild(dfsname, dirname, isLink)] = dfsTargetList
 
 	return dfsTargetList, nil
 }
