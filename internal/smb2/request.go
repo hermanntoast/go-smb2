@@ -1,6 +1,6 @@
 package smb2
 
-import "github.com/hirochachacha/go-smb2/internal/utf16le"
+import "github.com/hermanntoast/go-smb2/internal/utf16le"
 
 // ----------------------------------------------------------------------------
 // SMB2 NEGOTIATE Request Packet
@@ -1011,8 +1011,8 @@ func (r CancelRequestDecoder) StructureSize() uint16 {
 }
 
 // --------------------------------------------------------------------------
-//	REQ_GET_DFS_REFERRAL -- DFS Referral Request
 //
+//	REQ_GET_DFS_REFERRAL -- DFS Referral Request
 type DFSReferralRequest struct {
 	MaxReferralLevel uint16
 	RequestFileName  string
@@ -1255,7 +1255,7 @@ type CommonDFSResp struct {
 	NetworkAddress string
 }
 
-//RespGetDFSReferral DFS Referral Response (Common part)
+// RespGetDFSReferral DFS Referral Response (Common part)
 type RespGetDFSReferral struct {
 	PathConsumed        uint16
 	NumberOfReferrals   uint16
