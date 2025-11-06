@@ -911,3 +911,40 @@ func TestGetDFSTarget(t *testing.T) {
 	}
 
 }
+
+func TestWhoAmI(t *testing.T) {
+	if fs == nil {
+		t.Skip()
+	}
+
+	identity, err := fs.WhoAmI()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if identity == nil {
+		t.Fatal("WhoAmI returned nil identity")
+	}
+
+	// User SID should be present and have the S-1-... format
+	if identity.UserSID == "" {
+		t.Error("UserSID is empty")
+	}
+	if !strings.HasPrefix(identity.UserSID, "S-1-") {
+		t.Errorf("UserSID has unexpected format: %s", identity.UserSID)
+	}
+
+	// GroupSIDs should be initialized (even if empty)
+	if identity.GroupSIDs == nil {
+		t.Error("GroupSIDs is nil, expected initialized slice")
+	}
+
+	t.Logf("User SID: %s", identity.UserSID)
+	t.Logf("Number of Group SIDs: %d", len(identity.GroupSIDs))
+	for i, gid := range identity.GroupSIDs {
+		if !strings.HasPrefix(gid, "S-1-") {
+			t.Errorf("GroupSID[%d] has unexpected format: %s", i, gid)
+		}
+		t.Logf("  Group SID %d: %s", i, gid)
+	}
+}

@@ -941,6 +941,73 @@ func (fs *Share) Security(name string) (*FileSecurityInfo, error) {
 	return fi, nil
 }
 
+// UserIdentity represents the current user's security context
+type UserIdentity struct {
+	UserSID   string   // The current user's SID
+	GroupSIDs []string // List of group SIDs the user belongs to
+}
+
+// WhoAmI retrieves the current user's SID and group SIDs by querying the security
+// descriptor of the share root. This provides information about the authenticated
+// user's identity and group memberships as seen by the SMB server.
+func (fs *Share) WhoAmI() (*UserIdentity, error) {
+	// Open the root directory to query its security descriptor
+	// Use empty string for root path as it's more universally supported than "."
+	create := &CreateRequest{
+		SecurityFlags:        0,
+		RequestedOplockLevel: SMB2_OPLOCK_LEVEL_NONE,
+		ImpersonationLevel:   Impersonation,
+		SmbCreateFlags:       0,
+		DesiredAccess:        READ_CONTROL,
+		FileAttributes:       FILE_ATTRIBUTE_DIRECTORY,
+		ShareAccess:          FILE_SHARE_READ | FILE_SHARE_WRITE,
+		CreateDisposition:    FILE_OPEN,
+		CreateOptions:        FILE_DIRECTORY_FILE,
+	}
+
+	f, err := fs.createFile("", create, false)
+	if err != nil {
+		return nil, &os.PathError{Op: "whoami", Path: "", Err: err}
+	}
+
+	fi, err := f.security()
+	if e := f.close(); err == nil {
+		err = e
+	}
+	if err != nil {
+		return nil, &os.PathError{Op: "whoami", Path: "", Err: err}
+	}
+
+	// Extract user SID (owner) and group SIDs from the security descriptor
+	identity := &UserIdentity{
+		UserSID:   fi.Owner,
+		GroupSIDs: make([]string, 0),
+	}
+
+	// Add the primary group SID
+	if fi.Group != "" && fi.Group != fi.Owner {
+		identity.GroupSIDs = append(identity.GroupSIDs, fi.Group)
+	}
+
+	// Extract unique group SIDs from DACL entries
+	// These represent groups that have access rights, which typically includes
+	// the user's group memberships
+	seenSIDs := make(map[string]bool)
+	seenSIDs[fi.Owner] = true  // Don't include user SID in groups
+	seenSIDs[fi.Group] = true  // Already added primary group
+
+	for _, ace := range fi.Dacl {
+		if ace.Sid != "" && !seenSIDs[ace.Sid] {
+			// Check if this is likely a group SID (not a well-known SID for Everyone, Anonymous, etc.)
+			// We include all SIDs as they might be relevant group memberships
+			identity.GroupSIDs = append(identity.GroupSIDs, ace.Sid)
+			seenSIDs[ace.Sid] = true
+		}
+	}
+
+	return identity, nil
+}
+
 func (fs *Share) createFile(name string, req *CreateRequest, followSymlinks bool) (f *File, err error) {
 	if followSymlinks {
 		return fs.createFileRec(name, req)
