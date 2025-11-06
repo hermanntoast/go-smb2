@@ -905,10 +905,7 @@ func TestGetDFSTarget(t *testing.T) {
 		t.Skip()
 	}
 
-	dfsdir := "DIRNAME"
-	isLink := false
-
-	_, err := ipc.GetDFSTargetList(session, sharename, dfsdir, isLink)
+	_, err := ipc.GetDFSTargetList(session, sharename)
 	if err != nil {
 		t.Error("unexpected error: ", err)
 	}
