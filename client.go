@@ -2577,7 +2577,7 @@ func (fs *Share) QueryQuota(name string) ([]QuotaInfo, error) {
 		RequestedOplockLevel: SMB2_OPLOCK_LEVEL_NONE,
 		ImpersonationLevel:   Impersonation,
 		SmbCreateFlags:       0,
-		DesiredAccess:        FILE_READ_ATTRIBUTES,
+		DesiredAccess:        FILE_READ_ATTRIBUTES | FILE_READ_DATA,
 		FileAttributes:       FILE_ATTRIBUTE_NORMAL,
 		ShareAccess:          FILE_SHARE_READ | FILE_SHARE_WRITE,
 		CreateDisposition:    FILE_OPEN,
