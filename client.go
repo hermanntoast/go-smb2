@@ -2504,12 +2504,20 @@ type QuotaInfo struct {
 }
 
 func (f *File) queryQuota(returnSingle, restartScan bool) ([]QuotaInfo, error) {
+	var flags uint32
+	if restartScan {
+		flags |= SL_RESTART_SCAN
+	}
+	if returnSingle {
+		flags |= SL_RETURN_SINGLE_ENTRY
+	}
+
 	req := &QueryInfoRequest{
-		InfoType:           SMB2_0_INFO_QUOTA,
-		FileInfoClass:      0,
+		InfoType:              SMB2_0_INFO_QUOTA,
+		FileInfoClass:         0,
 		AdditionalInformation: 0,
-		Flags:              0,
-		OutputBufferLength: 4096,
+		Flags:                 flags,
+		OutputBufferLength:    65536,
 		Input: &QueryQuotaInfo{
 			ReturnSingle: returnSingle,
 			RestartScan:  restartScan,
@@ -2572,16 +2580,19 @@ func (fs *Share) QueryQuota(name string) ([]QuotaInfo, error) {
 		return nil, err
 	}
 
+	// Quota handle must be opened with the same access mask that Samba's
+	// smbcquotas uses (DESIRED_ACCESS_PIPE), CreateOptions 0, and
+	// FileAttributes 0 — otherwise the server returns STATUS_INVALID_HANDLE.
 	create := &CreateRequest{
 		SecurityFlags:        0,
 		RequestedOplockLevel: SMB2_OPLOCK_LEVEL_NONE,
 		ImpersonationLevel:   Impersonation,
 		SmbCreateFlags:       0,
-		DesiredAccess:        FILE_READ_ATTRIBUTES | FILE_READ_DATA,
-		FileAttributes:       FILE_ATTRIBUTE_NORMAL,
+		DesiredAccess:        READ_CONTROL | FILE_READ_DATA | FILE_WRITE_DATA | FILE_READ_ATTRIBUTES | FILE_WRITE_ATTRIBUTES,
+		FileAttributes:       0,
 		ShareAccess:          FILE_SHARE_READ | FILE_SHARE_WRITE,
 		CreateDisposition:    FILE_OPEN,
-		CreateOptions:        FILE_DIRECTORY_FILE,
+		CreateOptions:        0,
 	}
 
 	f, err := fs.createFile(name, create, true)
