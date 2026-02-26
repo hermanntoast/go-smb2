@@ -2494,3 +2494,107 @@ func (fs *FileStat) IsDir() bool {
 func (fs *FileStat) Sys() interface{} {
 	return fs
 }
+
+// QuotaInfo holds per-user quota information returned by SMB2 QUERY_QUOTA.
+type QuotaInfo struct {
+	SID            string // e.g. "S-1-5-21-..."
+	QuotaUsed      int64  // bytes used by this user
+	QuotaThreshold int64  // warning threshold (-1 = none)
+	QuotaLimit     int64  // hard limit (-1 = none)
+}
+
+func (f *File) queryQuota(returnSingle, restartScan bool) ([]QuotaInfo, error) {
+	req := &QueryInfoRequest{
+		InfoType:           SMB2_0_INFO_QUOTA,
+		FileInfoClass:      0,
+		AdditionalInformation: 0,
+		Flags:              0,
+		OutputBufferLength: 4096,
+		Input: &QueryQuotaInfo{
+			ReturnSingle: returnSingle,
+			RestartScan:  restartScan,
+		},
+	}
+
+	infoBytes, err := f.queryInfo(req)
+	if err != nil {
+		return nil, err
+	}
+
+	var quotas []QuotaInfo
+	offset := 0
+	for {
+		if offset+40 > len(infoBytes) {
+			break
+		}
+		entry := FileQuotaInformationDecoder(infoBytes[offset:])
+		if entry.IsInvalid() {
+			break
+		}
+
+		sid := entry.Sid()
+		sidStr := ""
+		if !sid.IsInvalid() {
+			sidStr = sid.Decode().String()
+		}
+
+		quotas = append(quotas, QuotaInfo{
+			SID:            sidStr,
+			QuotaUsed:      entry.QuotaUsed(),
+			QuotaThreshold: entry.QuotaThreshold(),
+			QuotaLimit:     entry.QuotaLimit(),
+		})
+
+		next := entry.NextEntryOffset()
+		if next == 0 {
+			break
+		}
+		offset += int(next)
+	}
+
+	return quotas, nil
+}
+
+// QueryQuota returns per-user quota information for this file handle.
+func (f *File) QueryQuota() ([]QuotaInfo, error) {
+	quotas, err := f.queryQuota(false, true)
+	if err != nil {
+		return nil, &os.PathError{Op: "queryquota", Path: f.name, Err: err}
+	}
+	return quotas, nil
+}
+
+// QueryQuota returns per-user quota information for the given path on this share.
+func (fs *Share) QueryQuota(name string) ([]QuotaInfo, error) {
+	name = normPath(name)
+
+	if err := validatePath("queryquota", name, false); err != nil {
+		return nil, err
+	}
+
+	create := &CreateRequest{
+		SecurityFlags:        0,
+		RequestedOplockLevel: SMB2_OPLOCK_LEVEL_NONE,
+		ImpersonationLevel:   Impersonation,
+		SmbCreateFlags:       0,
+		DesiredAccess:        FILE_READ_ATTRIBUTES,
+		FileAttributes:       FILE_ATTRIBUTE_NORMAL,
+		ShareAccess:          FILE_SHARE_READ | FILE_SHARE_WRITE,
+		CreateDisposition:    FILE_OPEN,
+		CreateOptions:        FILE_DIRECTORY_FILE,
+	}
+
+	f, err := fs.createFile(name, create, true)
+	if err != nil {
+		return nil, &os.PathError{Op: "queryquota", Path: name, Err: err}
+	}
+
+	quotas, err := f.queryQuota(false, true)
+	if e := f.close(); err == nil {
+		err = e
+	}
+	if err != nil {
+		return nil, &os.PathError{Op: "queryquota", Path: name, Err: err}
+	}
+	return quotas, nil
+}
